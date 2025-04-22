@@ -1,0 +1,143 @@
+// ==UserScript==
+// @name         Torn Profile → 30d Stats
+// @namespace    https://www.torn.com/
+// @version      1.1
+// @description  Show last 30 days time played, xans taken & current activity streak on profile pages.
+// @match        https://www.torn.com/profiles.php?XID=*
+// @grant        GM_xmlhttpRequest
+// @connect      api.torn.com
+// ==/UserScript==
+
+;(async function(){
+  'use strict';
+
+  // ─── CONFIG ──────────────────────────────────────────────
+  const API_KEY = 'YOUR_API-KEY';   // ← your Torn PUBLIC API key here
+  const DAYS    = 30;                  // ← window size in days
+  // ──────────────────────────────────────────────────────────
+
+  // 1) get XID from the URL
+  const XID = new URLSearchParams(location.search).get('XID');
+  if (!XID) return;
+
+  // 2) compute UNIX timestamps for “now” & “ago”
+  const nowTs = Math.floor(Date.now()/1000);
+  const agoTs = nowTs - DAYS * 24*3600;
+
+  // 3) helper to fetch any stat at a given timestamp
+  function fetchStatAt(stat, ts){
+    const url = `https://api.torn.com/v2/user/${XID}/personalstats?stat=${stat}&timestamp=${ts}`;
+    return new Promise((resolve,reject)=>{
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        headers: {
+          'Authorization': `ApiKey ${API_KEY}`,
+          'Accept':        'application/json'
+        },
+        onerror:   reject,
+        ontimeout: ()=>reject(new Error('Timeout')),
+        onload(res){
+          let body;
+          try { body = JSON.parse(res.responseText); }
+          catch(e){ return reject(new Error('Invalid JSON')); }
+          if (body.error) {
+            return reject(new Error(`API error ${body.error.code}: ${body.error.error}`));
+          }
+          const entry = body.personalstats?.[0];
+          if (!entry) return reject(new Error('No data returned'));
+          resolve(entry.value);
+        }
+      });
+    });
+  }
+
+  // 4) fetch Δ time played
+  let oldPlay, newPlay;
+  try {
+    [oldPlay,newPlay] = await Promise.all([
+      fetchStatAt('timeplayed', agoTs),
+      fetchStatAt('timeplayed', nowTs),
+    ]);
+  } catch(err) {
+    console.error('timeplayed ▶️', err);
+    return;
+  }
+  const deltaPlay = newPlay - oldPlay;
+  const daysP  = Math.floor(deltaPlay/86400);
+  const hoursP = Math.floor((deltaPlay%86400)/3600);
+  const minsP  = Math.floor((deltaPlay%3600)/60);
+
+  // 5) fetch Δ xans taken
+  let oldXans, newXans;
+  try {
+    [oldXans,newXans] = await Promise.all([
+      fetchStatAt('xantaken', agoTs),
+      fetchStatAt('xantaken', nowTs),
+    ]);
+  } catch(err) {
+    console.error('xantaken ▶️', err);
+    return;
+  }
+  const deltaXans = newXans - oldXans;
+
+  // 6) fetch current activity streak
+  let streak;
+  try {
+    streak = await new Promise((resolve,reject)=>{
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: `https://api.torn.com/v2/user/${XID}/personalstats?stat=activestreak`,
+        headers: {
+          'Authorization': `ApiKey ${API_KEY}`,
+          'Accept':        'application/json'
+        },
+        onerror:   reject,
+        ontimeout: ()=>reject(new Error('Timeout')),
+        onload(res){
+          let body;
+          try { body = JSON.parse(res.responseText); }
+          catch(e){ return reject(new Error('Invalid JSON')); }
+          if (body.error) {
+            return reject(new Error(`API error ${body.error.code}: ${body.error.error}`));
+          }
+          const current = body.personalstats?.other?.activity?.streak?.current;
+          if (current == null) return reject(new Error('No streak returned'));
+          resolve(current);
+        }
+      });
+    });
+  } catch(err) {
+    console.error('activestreak ▶️', err);
+    return;
+  }
+
+  // 7) build elements
+  const timeEl   = document.createElement('div');
+  const xansEl   = document.createElement('div');
+  const streakEl = document.createElement('div');
+
+  timeEl.textContent   = `⏱️ Last ${DAYS} Days Time Played: ${daysP}d ${hoursP}h ${minsP}m`;
+  xansEl.textContent   = `💊 Xans taken last ${DAYS} Days: ${deltaXans}`;
+  streakEl.textContent = `🔥 Current Activity Streak: ${streak} days`;
+
+  // 8) container with vertical layout + small font
+  const container = document.createElement('div');
+  container.style.cssText = `
+    margin-top:4px;
+    font-size:12px;
+    display:flex;
+    flex-direction:column;
+    align-items:flex-start;
+    row-gap:2px;
+  `;
+  timeEl.style.color   = '#8ef';
+  xansEl.style.color   = '#f88';
+  streakEl.style.color = '#8f8';
+  container.append(timeEl, xansEl, streakEl);
+
+  // 9) inject right under the profile title
+  const titleH4 = document.querySelector('.content-title h4');
+  if (titleH4) titleH4.parentNode.insertBefore(container, titleH4.nextSibling);
+
+})();
